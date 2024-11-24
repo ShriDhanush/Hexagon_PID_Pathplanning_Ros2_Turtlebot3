@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+
+import rclpy
+
+from rclpy.node import Node
+
+from geometry_msgs.msg import Twist
+
+from nav_msgs.msg import Odometry
+
+from math import sqrt, pow, atan2, pi
+
+class PID:
+
+ def __init__(self, kp, ki, kd):
+
+ self.kp = kp
+
+ self.ki = ki
+
+ self.kd = kd
+
+ self.previous_error = 0.0
+
+ self.integral = 0.0
+
+ def calculate(self, error, dt):
+
+ self.integral += error * dt
+
+ derivative = (error - self.previous_error) / dt
+
+ output = self.kp * error + self.ki * self.integral + self.kd * derivative
+
+ self.previous_error = error
+
+ return output
+
+class ShapePathNode(Node):
+
+ def __init__(self, num_sides, iterations):
+
+ super().__init__('shape_path_node')
+
+ self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
+
+ self.odom_subscription = self.create_subscription(
+
+ Odometry, '/odom', self.odom_callback, 10)
+
+ self.state = 'MOVE_FORWARD'
+
+ self.current_position = [0.0, 0.0]
+
+ self.current_orientation = 0.0
+
+ self.initial_position = [0.0, 0.0]
+
+ self.initial_orientation = 0.0
+
+ self.move_distance = 1.0 # Adjust the distance for your shape's side length
+
+ self.num_sides = num_sides
+
+ self.turn_angle = (2 * pi) / self.num_sides
+
+ self.iterations = iterations
+
+ self.turns_completed = 0
+
+ self.movement_count = 0
+
+ # PID Controllers for linear and angular control
+
+ self.linear_pid = PID(kp=1.0, ki=0.0, kd=0.1) # Adjust values as necessary
+ self.angular_pid = PID(kp=1.0, ki=0.0, kd=0.1)
+
+ # Time variables for PID calculation
+
+ self.previous_time = self.get_clock().now()
+
+ # Timer to control the main loop
+
+ self.timer = self.create_timer(0.1, self.timer_callback)
+
+ def odom_callback(self, msg):
+
+ self.current_position = [msg.pose.pose.position.x, msg.pose.pose.position.y]
+
+ orientation_q = msg.pose.pose.orientation
+
+ _, _, yaw = self.euler_from_quaternion(orientation_q.x, orientation_q.y, orientation_q.z, 
+
+orientation_q.w)
+
+ self.current_orientation = yaw
+
+ def euler_from_quaternion(self, x, y, z, w):
+
+ import math
+
+ t3 = +2.0 * (w * z + x * y)
+
+ t4 = +1.0 - 2.0 * (y * y + z * z)
+
+ yaw = math.atan2(t3, t4)
+
+ return 0.0, 0.0, yaw
+
+ def distance_traveled(self):
+
+ """Calculate the Euclidean distance between initial and current position."""
+
+ return sqrt(pow((self.current_position[0] - self.initial_position[0]), 2) +
+
+ pow((self.current_position[1] - self.initial_position[1]), 2))
+
+ def angle_turned(self):
+
+ """Calculate the angle turned since the initial orientation."""
+
+ return abs(self.current_orientation - self.initial_orientation)
+
+ def timer_callback(self):
+
+ msg = Twist()
+
+ # Get current time and calculate time delta for PID controller
+
+ current_time = self.get_clock().now()
+
+ dt = (current_time - self.previous_time).nanoseconds / 1e9 # Convert nanoseconds to seconds
+
+ self.previous_time = current_time
+
+ if self.state == 'MOVE_FORWARD':
+
+ distance_error = self.move_distance - self.distance_traveled()
+
+ if distance_error > 0.01: # Still need to move forward
+
+ linear_velocity = self.linear_pid.calculate(distance_error, dt)
+
+ msg.linear.x = min(max(linear_velocity, 0.1), 0.3) # Limit min and max velocity
+
+ msg.angular.z = 0.0
+
+ else:
+msg.linear.x = 0.0
+
+ msg.angular.z = 0.0
+
+ self.state = 'TURN'
+
+ self.initial_orientation = self.current_orientation # Set initial orientation for turning
+
+ elif self.state == 'TURN':
+
+ angle_error = self.turn_angle - self.angle_turned()
+
+ if angle_error > 0.01: # Still need to turn
+
+ angular_velocity = self.angular_pid.calculate(angle_error, dt)
+
+ msg.linear.x = 0.0
+
+ msg.angular.z = min(max(angular_velocity, 0.1), 0.5) # Limit min and max angular velocity
+
+ else:
+
+ msg.linear.x = 0.0
+
+ msg.angular.z = 0.0
+
+ self.state = 'MOVE_FORWARD'
+
+ self.turns_completed += 1
+
+ self.initial_position = self.current_position # Set initial position for next move
+
+ if self.turns_completed >= self.iterations * self.num_sides: # After completing all sides
+
+ self.get_logger().info(f'Completed {self.iterations}-iteration {self.num_sides}-sided shape 
+
+path')
+
+ self.destroy_node()
+
+ rclpy.shutdown()
+
+ self.publisher_.publish(msg)
+
+def main(args=None):
+
+ rclpy.init(args=args)
+
+ num_sides = 6 # Set this to 6 for a hexagon
+
+ iterations = 7 # Number of forward + turn iterations
+
+ shape_path_node = ShapePathNode(num_sides, iterations)
+
+ rclpy.spin(shape_path_node)
+
+if __name__ == '__main__':
+
+ main()
